@@ -30,10 +30,10 @@ import torch.nn as nn
 # ----------------------------
 # 1. Cấu hình - SỬA Ở ĐÂY
 # ----------------------------
-MODEL_PATH = r"D:\TongHop\RTC Technologi\PCB\model\model17\edge_classifier_fewshot_mobilenet_v3_large.pt"
+MODEL_PATH = r"D:\TongHop\RTC Technologi\G8\model\model3\edge_classifier_fewshot_mobilenet_v3_large.pt"
 
 # Có thể là 1 FILE ảnh, hoặc 1 THƯ MỤC chứa nhiều ảnh (duyệt lần lượt)
-IMAGE_PATH = r"D:\TongHop\RTC Technologi\PCB\crop9\part2"
+IMAGE_PATH = r"D:\TongHop\RTC Technologi\G8\dataset\Parts3\Parts2\Part1"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMG_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
@@ -242,7 +242,7 @@ def _resize_for_display(img, max_width):
     h, w = img.shape[:2]
     if w <= max_width:
         return img
-    scale = max_width / float(w)
+    scale = (max_width / float(w))
     return cv2.resize(img, (int(w * scale), int(h * scale)))
 
 
@@ -300,7 +300,7 @@ def process_image(image_path, model, class_names, gradcam):
     combined = np.hstack([orig_with_bbox, overlay_resized])
     # Resize xuong con 1 nua kich thuoc that (giu nguyen moi thu khac, chi
     # them dung 1 dong nay thay cho _resize_for_display truoc do):
-    disp = cv2.resize(combined, None, fx=0.35, fy=0.35)
+    disp = cv2.resize(combined, None, fx=0.15, fy=0.15)
 
     print(f"  {os.path.basename(image_path)}: đoán '{pred_class}' ({confidence*100:.1f}%)"
           + ("" if bbox is not None else "  [không detect được]"))

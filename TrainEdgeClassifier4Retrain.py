@@ -1,35 +1,50 @@
 """
 KIẾN TRÚC CHUNG: Pretrained-CNN + Few-shot learning + K-Fold Cross Validation.
-
-Đây là pipeline TỔNG QUÁT, dùng lại được cho BẤT KỲ bài toán phân loại ảnh
-ít dữ liệu nào (màu sắc, trái cây, OK/NG, vật thể...) - chỉ cần sửa phần
-CONFIG bên dưới, không cần đụng vào logic code.
++ CACHE EMBEDDING RA ĐĨA -> thêm/bớt class, thêm/bớt ảnh mà KHÔNG extract lại
+  embedding cho những ảnh không đổi.
 
 --------------------------------------------------------------------------
-Ý TƯỞNG CỐT LÕI (không đổi giữa các bài toán):
+Ý TƯỞNG CỐT LÕI (GIỮ NGUYÊN so với bản gốc):
 --------------------------------------------------------------------------
-1. Backbone CNN (MobileNetV2/V3) ĐÓNG BĂNG HOÀN TOÀN, không fine-tune.
-2. Extract embedding (vector đặc trưng) cho mỗi ảnh 1 LẦN DUY NHẤT, cache
-   lại -> việc "train" sau đó chỉ là train 1 classifier NHẸ trên embedding,
-   nhanh gấp hàng chục lần so với train lại cả CNN.
-3. Vì dataset ít, KHÔNG chia train/val cố định một lần (dễ bị đánh giá sai
-   lệch, không ổn định) -> dùng K-FOLD CROSS VALIDATION: gộp hết dữ liệu,
-   xoay vòng chia K phần, mỗi ảnh đều được làm "val" ít nhất 1 lần.
-   Đây là cách giải quyết "làm giàu val" ĐÚNG NGUYÊN TẮC và TỔNG QUÁT,
-   không phụ thuộc vào bài toán cụ thể là gì.
-4. Sau khi đánh giá xong bằng K-Fold, train 1 model "sản xuất" cuối cùng
-   trên TOÀN BỘ dữ liệu (không giữ lại val) để deploy.
+1. Backbone CNN đóng băng hoàn toàn, không fine-tune.
+2. Extract embedding cho mỗi ảnh -> "train" chỉ là train 1 head nhẹ.
+3. K-Fold Cross Validation để đánh giá không thiên vị.
+4. Train model sản xuất cuối cùng trên toàn bộ dữ liệu để deploy.
 
 --------------------------------------------------------------------------
-CÁCH ÁP DỤNG CHO BÀI TOÁN MỚI:
+PHẦN THÊM MỚI: CACHE EMBEDDING
 --------------------------------------------------------------------------
-Chỉ cần sửa phần CONFIG bên dưới:
-  - DATASET_DIRS: trỏ tới (các) thư mục chứa ảnh, mỗi class 1 thư mục con
-  - AUGMENT_CONFIG: bật/tắt phép augmentation phù hợp với bài toán
-    (vd: tắt ColorJitter cho bài toán MÀU, tắt Flip cho bài toán có chữ/
-    ký hiệu định hướng)
-  - BACKBONE_NAME, K_FOLDS, HEAD_EPOCHS...
-Không cần sửa bất kỳ dòng logic nào khác trong file.
+Extract embedding (chạy ảnh qua CNN) là bước ĐẮT NHẤT. Train head thì rất
+nhanh. Nên embedding của mỗi ảnh được LƯU RA ĐĨA (CACHE_DIR). Mỗi lần chạy:
+  - Ảnh đã có trong cache & file không đổi  -> DÙNG LẠI, không extract.
+  - Ảnh mới / ảnh vừa sửa                   -> extract rồi lưu cache.
+  - Ảnh/class đã bị xoá khỏi dataset        -> cache tương ứng bị dọn đi.
+Sau đó head được train lại trên tập embedding đã cập nhật (nhanh).
+
+=> BA THAO TÁC BẠN CẦN, chỉ việc SỬA THƯ MỤC DATASET rồi CHẠY LẠI file này:
+
+  1. THÊM CLASS MỚI:
+     - Tạo thư mục class mới trong dataset, bỏ ảnh vào.
+     - Chạy lại. Chỉ ảnh class mới được extract; các class cũ dùng cache.
+
+  2. THÊM/BỚT ẢNH TRONG CLASS CŨ:
+     - Copy thêm ảnh mới vào / xoá bớt ảnh cũ trong thư mục class đó.
+     - Chạy lại. Chỉ ảnh mới được extract; ảnh bị xoá thì cache tự dọn.
+
+  3. XOÁ HẲN 1 CLASS:
+     - Xoá thư mục class đó, HOẶC thêm tên nó vào EXCLUDE_CLASSES bên dưới.
+     - Chạy lại. Class biến mất khỏi model, cache của nó được dọn.
+
+LƯU Ý QUAN TRỌNG về nhãn (label): class_names được sort lại mỗi lần chạy, nên
+thêm/xoá class có thể làm chỉ số nhãn dịch chuyển. Điều này KHÔNG gây lỗi vì
+cache được đánh dấu theo ĐƯỜNG DẪN ẢNH (không theo nhãn), và head luôn train
+lại từ đầu cho đúng bộ class hiện tại. File model lưu kèm class_names nên mọi
+script inference/heatmap đọc đúng tên class tự động.
+
+LƯU Ý về augmentation: một khi ảnh đã được cache, các bản augment của nó bị
+"đóng băng" (dùng lại đúng các bản đã sinh lần đầu) cho tới khi ảnh đổi hoặc
+bạn xoá cache. Đây là đánh đổi để có tính tái lập + tốc độ. Muốn sinh lại
+augment mới cho toàn bộ -> đặt CLEAR_CACHE = True một lần.
 
 Cách chạy:
     python few_shot_pipeline.py
@@ -38,6 +53,9 @@ Cách chạy:
 import os
 import time
 import random
+import hashlib
+import json
+import glob
 
 import numpy as np
 import torch
@@ -50,34 +68,40 @@ from PIL import Image
 # CONFIG - SỬA Ở ĐÂY KHI ÁP DỤNG CHO BÀI TOÁN MỚI
 # ==========================================================================
 
-# Danh sách thư mục chứa dữ liệu, mỗi thư mục có cấu trúc class1/, class2/,...
-# Nếu bạn vẫn còn tách sẵn train/ và val/, liệt kê cả 2 - script sẽ TỰ GỘP
-# lại rồi chia K-Fold, không cần bạn tự gộp tay.
 DATASET_DIRS = [
     r"D:\TongHop\RTC Technologi\G8\dataset\Parts1\train",
     r"D:\TongHop\RTC Technologi\G8\dataset\Parts1\val",
 ]
 
-MODEL_DIR = r"D:\TongHop\RTC Technologi\G8\model\model2"
+# Class muốn LOẠI khỏi lần train này (cách nhanh để "xoá class" mà không cần
+# xoá thư mục). Vd: {"Part7", "Part12"}. Để trống = dùng hết.
+EXCLUDE_CLASSES = set()
+
+MODEL_DIR = r"D:\TongHop\RTC Technologi\G8\model\model3"
 BACKBONE_NAME = "mobilenet_v3_large"   # "mobilenet_v2" | "mobilenet_v3_large" | "mobilenet_v3_small"
 MODEL_OUT = os.path.join(MODEL_DIR, f"edge_classifier_fewshot_{BACKBONE_NAME}.pt")
 
-# Cấu hình augmentation - BẬT/TẮT theo đặc thù bài toán, không hard-code cứng
+# --- CACHE EMBEDDING ---
+CACHE_DIR = os.path.join(MODEL_DIR, "emb_cache")   # nơi lưu embedding từng ảnh
+USE_EMBEDDING_CACHE = True     # False = luôn extract lại toàn bộ (như bản gốc)
+CLEAR_CACHE = False            # True = xoá sạch cache rồi extract lại từ đầu
+PRUNE_CACHE = True             # True = dọn cache của ảnh không còn trong dataset
+
 AUGMENT_CONFIG = {
-    "horizontal_flip": True,     # tắt nếu ảnh có chữ/hướng quan trọng
-    "rotation_degrees": 30,      # 0 để tắt xoay
-    "color_jitter": True,       # tắt nếu bài toán phụ thuộc MÀU SẮC (như hiện tại)
-    "random_resized_crop": True, # tắt nếu bố cục/vị trí vật thể trong ảnh quan trọng
+    "horizontal_flip": True,
+    "rotation_degrees": 30,
+    "color_jitter": True,
+    "random_resized_crop": True,
 }
 
-AUGMENT_COPIES = 20   # số bản augmentation/ảnh khi extract embedding cho train
-K_FOLDS = 5            # số fold cross-validation - tăng nếu dataset lớn hơn
+AUGMENT_COPIES = 20
+K_FOLDS = 5
 
 HEAD_EPOCHS = 400
 HEAD_LR = 1e-3
 HEAD_DROPOUT = 0.3
 EARLY_STOP_PATIENCE = 50
-PRINT_EPOCH_DETAILS = True   # True = in chi tiết từng epoch trong mỗi fold (như trước)
+PRINT_EPOCH_DETAILS = True
 
 RANDOM_SEED = 42
 
@@ -85,7 +109,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.backends.cudnn.benchmark = True
 
 # ==========================================================================
-# Từ đây trở xuống là LOGIC CHUNG - không cần sửa khi đổi bài toán
+# Từ đây trở xuống là LOGIC CHUNG
 # ==========================================================================
 
 random.seed(RANDOM_SEED)
@@ -117,15 +141,15 @@ def build_transforms(augment_cfg):
     return transforms.Compose(aug_ops), transforms.Compose(clean_ops)
 
 
-def list_images(dataset_dirs):
-    """Gộp ảnh từ nhiều thư mục (vd train/ + val/) thành 1 danh sách chung.
-    Trả về: image_paths (list[str]), labels (list[int]), class_names (list[str])."""
+def list_images(dataset_dirs, exclude_classes=frozenset()):
+    """Gộp ảnh từ nhiều thư mục thành 1 danh sách chung, bỏ qua class bị loại.
+    Trả về: image_paths, labels, class_names."""
     class_names = set()
     for d in dataset_dirs:
         if not os.path.isdir(d):
             raise FileNotFoundError(f"Không tìm thấy thư mục: {d}")
         for entry in os.scandir(d):
-            if entry.is_dir():
+            if entry.is_dir() and entry.name not in exclude_classes:
                 class_names.add(entry.name)
     class_names = sorted(class_names)
     class_to_idx = {c: i for i, c in enumerate(class_names)}
@@ -186,45 +210,119 @@ def extract_embedding(backbone, image_tensor):
     return torch.flatten(x, 1)
 
 
-@torch.no_grad()
-def precompute_all_embeddings(backbone, image_paths, augment_transform, clean_transform, augment_copies):
-    """
-    Với MỖI ảnh gốc, tính sẵn:
-      - augmented_emb[i]: tensor (augment_copies, dim) - dùng khi ảnh này rơi vào phần TRAIN của 1 fold
-      - clean_emb[i]:      tensor (1, dim)               - dùng khi ảnh này rơi vào phần VAL của 1 fold
-    Việc này chỉ làm 1 LẦN cho toàn bộ dataset, sau đó K-Fold chỉ việc
-    "chọn lại" các embedding có sẵn theo từng fold - không phải extract lại.
-    """
+# ==========================================================================
+# CACHE EMBEDDING — phần thêm mới
+# ==========================================================================
+def _augment_signature(augment_cfg, augment_copies, backbone_name):
+    """Chữ ký cấu hình. Đổi augment/backbone/số copies -> chữ ký đổi -> cache
+    cũ không còn hợp lệ (sẽ extract lại), tránh trộn embedding khác cấu hình."""
+    payload = json.dumps({"cfg": augment_cfg, "copies": augment_copies,
+                          "backbone": backbone_name}, sort_keys=True)
+    return hashlib.md5(payload.encode()).hexdigest()[:12]
+
+
+def _image_key(path):
+    return hashlib.md5(os.path.abspath(path).encode()).hexdigest()
+
+
+def _cache_path(path, sig):
+    return os.path.join(CACHE_DIR, f"{_image_key(path)}_{sig}.npz")
+
+
+def _load_cached(path, sig):
+    """Trả (aug_emb tensor, clean_emb tensor) nếu cache hợp lệ, ngược lại None.
+    Hợp lệ = tồn tại + đúng chữ ký + file ảnh chưa đổi (mtime & size)."""
+    cp = _cache_path(path, sig)
+    if not os.path.isfile(cp):
+        return None
+    try:
+        data = np.load(cp, allow_pickle=False)
+        if float(data["mtime"]) != os.path.getmtime(path):
+            return None
+        if int(data["size"]) != os.path.getsize(path):
+            return None
+        aug = torch.from_numpy(data["aug"].astype(np.float32))
+        clean = torch.from_numpy(data["clean"].astype(np.float32))
+        return aug, clean
+    except Exception:
+        return None
+
+
+def _save_cache(path, sig, aug_emb, clean_emb):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    np.savez(
+        _cache_path(path, sig),
+        aug=aug_emb.cpu().numpy().astype(np.float32),
+        clean=clean_emb.cpu().numpy().astype(np.float32),
+        mtime=np.array(os.path.getmtime(path), dtype=np.float64),
+        size=np.array(os.path.getsize(path), dtype=np.int64),
+    )
+
+
+def _prune_cache(image_paths):
+    """Xoá file cache của những ảnh KHÔNG còn trong dataset hiện tại
+    (đã xoá ảnh / đã xoá hoặc loại class). Trả về số file đã dọn."""
+    if not os.path.isdir(CACHE_DIR):
+        return 0
+    current_keys = {_image_key(p) for p in image_paths}
+    removed = 0
+    for cp in glob.glob(os.path.join(CACHE_DIR, "*.npz")):
+        name = os.path.basename(cp)
+        key = name.split("_")[0]          # md5 (32 hex) không chứa '_'
+        if key not in current_keys:
+            try:
+                os.remove(cp)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def precompute_all_embeddings(backbone, image_paths, augment_transform,
+                              clean_transform, augment_copies, sig):
+    """Như bản gốc nhưng CÓ CACHE: ảnh nào đã cache & chưa đổi thì dùng lại,
+    ảnh mới/đổi thì extract rồi lưu. Trả (augmented_emb_list, clean_emb_list)."""
     augmented_emb, clean_emb = [], []
+    n_hit, n_miss = 0, 0
 
     for path in image_paths:
-        image = Image.open(path).convert("RGB")
+        cached = None
+        if USE_EMBEDDING_CACHE:
+            cached = _load_cached(path, sig)
 
-        aug_tensors = torch.stack([augment_transform(image) for _ in range(augment_copies)]).to(DEVICE)
-        aug_emb = extract_embedding(backbone, aug_tensors)
-        augmented_emb.append(aug_emb.cpu())
+        if cached is not None:
+            aug_emb, c_emb = cached
+            n_hit += 1
+        else:
+            image = Image.open(path).convert("RGB")
+            aug_tensors = torch.stack(
+                [augment_transform(image) for _ in range(augment_copies)]
+            ).to(DEVICE)
+            aug_emb = extract_embedding(backbone, aug_tensors).cpu()
 
-        clean_tensor = clean_transform(image).unsqueeze(0).to(DEVICE)
-        c_emb = extract_embedding(backbone, clean_tensor)
-        clean_emb.append(c_emb.cpu())
+            clean_tensor = clean_transform(image).unsqueeze(0).to(DEVICE)
+            c_emb = extract_embedding(backbone, clean_tensor).cpu()
 
+            if USE_EMBEDDING_CACHE:
+                _save_cache(path, sig, aug_emb, c_emb)
+            n_miss += 1
+
+        augmented_emb.append(aug_emb)
+        clean_emb.append(c_emb)
+
+    print(f"  Cache: dùng lại {n_hit} ảnh | extract mới {n_miss} ảnh")
     return augmented_emb, clean_emb
 
 
 def stratified_k_fold_indices(labels, k, seed=42):
-    """Chia index thành k fold, đảm bảo tỉ lệ mỗi class đồng đều giữa các fold
-    (stratified) - viết tay, không phụ thuộc thư viện ngoài."""
     labels = np.array(labels)
     rng = np.random.RandomState(seed)
     fold_assignment = np.zeros(len(labels), dtype=int)
-
     for c in np.unique(labels):
         idx_c = np.where(labels == c)[0]
         rng.shuffle(idx_c)
-        # Chia đều idx_c thành k phần, phân bổ lần lượt fold 0,1,2,...,k-1
         for i, idx in enumerate(idx_c):
             fold_assignment[idx] = i % k
-
     return fold_assignment
 
 
@@ -234,10 +332,6 @@ def make_head(embedding_dim, num_classes, dropout):
 
 def train_head(train_emb, train_labels, val_emb, val_labels, embedding_dim, num_classes,
                 epochs, lr, dropout, patience, print_epochs=False, fold_label=""):
-    """Train 1 classifier head trên embedding đã cache. Dùng chung cho cả
-    K-Fold (train/val nội bộ mỗi fold) lẫn train model sản xuất cuối cùng.
-    Trả về thêm val_probs (xác suất từng class cho từng ảnh val) để phục vụ
-    báo cáo chi tiết. Nếu print_epochs=True, in ra tiến trình từng epoch."""
     head = make_head(embedding_dim, num_classes, dropout)
 
     class_weights = train_emb.shape[0] / (
@@ -313,7 +407,6 @@ def print_detailed_report(image_paths, labels_np, oof_pred, oof_probs, oof_fold,
     num_classes = len(class_names)
     n = len(image_paths)
 
-    # --- Confusion matrix (hàng = thật, cột = dự đoán) ---
     confusion = np.zeros((num_classes, num_classes), dtype=int)
     for i in range(n):
         confusion[labels_np[i], oof_pred[i]] += 1
@@ -329,7 +422,6 @@ def print_detailed_report(image_paths, labels_np, oof_pred, oof_probs, oof_fold,
         row_str = row_name.ljust(15) + "".join(f"{confusion[i, j]:>12d}" for j in range(num_classes))
         print(row_str)
 
-    # --- Accuracy + confidence trung bình theo từng class ---
     print("\nAccuracy & Confidence trung bình theo từng class:")
     print(f"{'Class':<15}{'Số ảnh':>8}{'Đúng':>8}{'Accuracy':>12}{'Conf TB (khi đúng)':>22}{'Conf TB (khi sai)':>20}")
     print("-" * 90)
@@ -351,7 +443,6 @@ def print_detailed_report(image_paths, labels_np, oof_pred, oof_probs, oof_fold,
     print("-" * 90)
     print(f"{'TỔNG CỘNG':<15}{n:>8}{sum(1 for i in range(n) if oof_pred[i]==labels_np[i]):>8}{overall_acc:>11.2%}")
 
-    # --- Bảng chi tiết từng ảnh ---
     print("\n" + "-" * 100)
     print("Chi tiết từng ảnh (out-of-fold prediction):")
     col_width = max(10, max(len(c) for c in class_names) + 2)
@@ -371,7 +462,6 @@ def print_detailed_report(image_paths, labels_np, oof_pred, oof_probs, oof_fold,
             row += f"{oof_probs[i][c_idx]:>{col_width-1}.1%} "
         print(row)
 
-    # --- Xuất CSV để mở bằng Excel ---
     csv_path = os.path.join(MODEL_DIR, "kfold_detailed_report.csv")
     os.makedirs(MODEL_DIR, exist_ok=True)
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -396,28 +486,42 @@ def main():
     print(f"Đang chạy trên: {DEVICE}")
     print(f"Backbone: {BACKBONE_NAME}")
 
-    image_paths, labels, class_names = list_images(DATASET_DIRS)
+    if CLEAR_CACHE and os.path.isdir(CACHE_DIR):
+        import shutil
+        shutil.rmtree(CACHE_DIR)
+        print("Đã xoá sạch cache embedding (CLEAR_CACHE=True).")
+
+    if EXCLUDE_CLASSES:
+        print(f"Loại các class: {sorted(EXCLUDE_CLASSES)}")
+
+    image_paths, labels, class_names = list_images(DATASET_DIRS, EXCLUDE_CLASSES)
     num_classes = len(class_names)
     print(f"Tổng số ảnh (đã gộp mọi thư mục): {len(image_paths)}")
-    print(f"Các class: {class_names}")
+    print(f"Các class ({num_classes}): {class_names}")
     counts = np.bincount(labels, minlength=num_classes)
     print(f"Số ảnh mỗi class: {dict(zip(class_names, counts))}")
 
     augment_transform, clean_transform = build_transforms(AUGMENT_CONFIG)
+    sig = _augment_signature(AUGMENT_CONFIG, AUGMENT_COPIES, BACKBONE_NAME)
 
     backbone, embedding_dim = build_backbone(BACKBONE_NAME)
     print(f"Embedding dimension: {embedding_dim}")
 
-    print(f"\nĐang extract embedding cho toàn bộ {len(image_paths)} ảnh "
-          f"({AUGMENT_COPIES} bản augment/ảnh, chỉ chạy 1 lần)...")
+    if PRUNE_CACHE and USE_EMBEDDING_CACHE and not CLEAR_CACHE:
+        removed = _prune_cache(image_paths)
+        if removed:
+            print(f"Đã dọn {removed} file cache của ảnh/class không còn dùng.")
+
+    print(f"\nĐang chuẩn bị embedding cho {len(image_paths)} ảnh "
+          f"({AUGMENT_COPIES} bản augment/ảnh)...")
     t0 = time.time()
     augmented_emb_list, clean_emb_list = precompute_all_embeddings(
-        backbone, image_paths, augment_transform, clean_transform, AUGMENT_COPIES
+        backbone, image_paths, augment_transform, clean_transform, AUGMENT_COPIES, sig
     )
     print(f"  -> Xong sau {time.time()-t0:.1f}s")
 
     # --------------------------------------------------------------------
-    # K-FOLD CROSS VALIDATION - đánh giá độ ổn định thật sự của model
+    # K-FOLD CROSS VALIDATION
     # --------------------------------------------------------------------
     fold_assignment = stratified_k_fold_indices(labels, K_FOLDS, seed=RANDOM_SEED)
     labels_np = np.array(labels)
@@ -425,12 +529,9 @@ def main():
     print(f"\n=== K-Fold Cross Validation (K={K_FOLDS}) ===")
     fold_accs, fold_losses = [], []
 
-    # Lưu kết quả "out-of-fold" cho TỪNG ẢNH - vì mỗi ảnh chỉ làm val đúng 1
-    # lần trong toàn bộ K-Fold, ta có thể gộp lại thành báo cáo đầy đủ,
-    # không thiên vị, cho TOÀN BỘ dataset (không chỉ 1 tập test riêng nhỏ).
-    oof_pred = [None] * len(image_paths)       # class dự đoán
-    oof_probs = [None] * len(image_paths)      # xác suất từng class
-    oof_fold = [None] * len(image_paths)       # ảnh này thuộc fold nào
+    oof_pred = [None] * len(image_paths)
+    oof_probs = [None] * len(image_paths)
+    oof_fold = [None] * len(image_paths)
 
     for fold in range(K_FOLDS):
         val_idx = np.where(fold_assignment == fold)[0]
@@ -454,7 +555,6 @@ def main():
         fold_accs.append(val_acc)
         fold_losses.append(val_loss)
 
-        # Ghi lại kết quả từng ảnh trong fold này
         for local_i, global_i in enumerate(val_idx):
             probs_row = val_probs[local_i]
             oof_pred[global_i] = int(probs_row.argmax().item())
@@ -467,16 +567,11 @@ def main():
     fold_accs = np.array(fold_accs)
     print(f"\n>>> Kết quả K-Fold: Accuracy trung bình = {fold_accs.mean():.2%} "
           f"(độ lệch chuẩn ±{fold_accs.std():.2%})")
-    print(">>> Đây là chỉ số ĐÁNG TIN CẬY hơn nhiều so với 1 lần chia val cố định,")
-    print(">>> vì đã được đánh giá trên TOÀN BỘ dữ liệu, không phụ thuộc may rủi của 1 lần chia.")
 
-    # --------------------------------------------------------------------
-    # BÁO CÁO CHI TIẾT - tổng hợp từ kết quả out-of-fold của TOÀN BỘ ảnh
-    # --------------------------------------------------------------------
     print_detailed_report(image_paths, labels_np, oof_pred, oof_probs, oof_fold, class_names)
 
     # --------------------------------------------------------------------
-    # Train model SẢN XUẤT cuối cùng trên TOÀN BỘ dữ liệu (không giữ val)
+    # Train model SẢN XUẤT cuối cùng trên TOÀN BỘ dữ liệu
     # --------------------------------------------------------------------
     print(f"\n=== Train model cuối cùng trên toàn bộ {len(image_paths)} ảnh (để deploy) ===")
     all_train_emb = torch.cat(augmented_emb_list, dim=0).to(DEVICE)
@@ -484,13 +579,11 @@ def main():
         [labels_np[i] for i in range(len(image_paths)) for _ in range(AUGMENT_COPIES)], dtype=torch.long
     ).to(DEVICE)
 
-    # Số epoch cho model cuối = trung bình số epoch hội tụ tốt nhất qua các fold
-    # (ước lượng hợp lý, vì không còn tập val riêng để early-stop nữa)
     final_epochs = max(50, int(HEAD_EPOCHS * 0.5))
 
     final_head, _, _, _ = train_head(
         all_train_emb, all_train_lbl, None, None, embedding_dim, num_classes,
-        final_epochs, HEAD_LR, HEAD_DROPOUT, patience=final_epochs,  # không early stop, chạy hết
+        final_epochs, HEAD_LR, HEAD_DROPOUT, patience=final_epochs,
         print_epochs=PRINT_EPOCH_DETAILS, fold_label="Model cuối cùng"
     )
 
