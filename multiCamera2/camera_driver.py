@@ -12,7 +12,11 @@ from ctypes import *
 import cv2
 import numpy as np
 
-from config import TARGET_FPS, GEV_PACKET_SIZE, GEV_PACKET_DELAY, IMAGE_NODE_NUM, MAX_EXPOSURE_TIME
+from config import (
+    TARGET_FPS, GEV_PACKET_SIZE, GEV_PACKET_DELAY,
+    IMAGE_NODE_NUM, MAX_EXPOSURE_TIME,
+    SPECIFIC_MASTER_IP, SPECIFIC_MASTER_SERIAL
+)
 
 # ============================================================
 # CẤU HÌNH SDK MVS HIKROBOT
@@ -49,8 +53,14 @@ except Exception as e:
 
 
 def get_device_info_dict(dev_info):
-    """Trích xuất Model, Serial, IP từ MV_CC_DEVICE_INFO."""
-    info = {"model": "Unknown", "serial": "Unknown", "ip": "Unknown", "type": "GigE"}
+    """Trích xuất Model, Serial, IP và phân loại Color/Mono từ MV_CC_DEVICE_INFO."""
+    info = {
+        "model": "Unknown",
+        "serial": "Unknown",
+        "ip": "Unknown",
+        "type": "GigE",
+        "is_color": False
+    }
     try:
         if dev_info.nTLayerType == MV_GIGE_DEVICE:
             gige = dev_info.SpecialInfo.stGigEInfo
@@ -67,6 +77,15 @@ def get_device_info_dict(dev_info):
             info["serial"] = "".join(chr(c) for c in usb.chSerialNumber if c != 0).strip()
             info["ip"] = "USB"
             info["type"] = "USB"
+
+        # Phân loại Color vs Mono theo tên model (Hikrobot GC/UC/C, Sentech C...)
+        model_upper = info["model"].upper()
+        if any(c_tag in model_upper for c_tag in ["-10GC", "-20GC", "-10UC", "-20UC", "-13GC", "-13UC", "GC", "UC", "COLOR"]):
+            info["is_color"] = True
+        elif model_upper.endswith("C"):
+            info["is_color"] = True
+        else:
+            info["is_color"] = False
     except Exception:
         pass
     return info
@@ -75,10 +94,11 @@ def get_device_info_dict(dev_info):
 class IndustrialCamera:
     """Quản lý kết nối, tối ưu mạng GigE, giải mã màu BGR và thu nhận ảnh liên tục."""
 
-    def __init__(self, cam_id, dev_info=None, name=None, target_fps=TARGET_FPS):
+    def __init__(self, cam_id, dev_info=None, name=None, is_master=False, target_fps=TARGET_FPS):
         self.cam_id = cam_id
         self.dev_info = dev_info
         self.name = name if name else f"cam{cam_id + 1}"
+        self.is_master = is_master
         self.target_fps = target_fps
         self.cam = MvCamera()
         
@@ -112,45 +132,89 @@ class IndustrialCamera:
                 err_msg += " (Camera đang bị MVS.exe hoặc tiến trình khác chiếm)"
             elif ret == 0x80000204:
                 err_msg += " (Thiết bị bận hoặc mất kết nối mạng)"
+            elif ret in (0x80000215, 0x80000206):
+                err_msg += f" (LỆCH DẢI MẠNG: Camera đang ở IP {self.cam_info['ip']}, khác dải với card mạng máy tính)"
             print(f"[{self.name}] Lỗi MV_CC_OpenDevice: {err_msg}")
             self.cam.MV_CC_DestroyHandle()
             return False
 
         # Tối ưu hóa GigE Vision
         if self.dev_info.nTLayerType == MV_GIGE_DEVICE:
-            self.cam.MV_CC_SetIntValue("GevSCPSPacketSize", GEV_PACKET_SIZE)
-            self.cam.MV_CC_SetIntValue("GevSCPD", GEV_PACKET_DELAY)
             try:
-                self.cam.MV_CC_SetBoolValue("GevSCPHostResend", True)
+                opt_packet_size = self.cam.MV_CC_GetOptimalPacketSize()
+                if opt_packet_size > 0:
+                    self.cam.MV_CC_SetIntValue("GevSCPSPacketSize", opt_packet_size)
+                else:
+                    self.cam.MV_CC_SetIntValue("GevSCPSPacketSize", GEV_PACKET_SIZE)
             except Exception:
-                pass
+                try:
+                    self.cam.MV_CC_SetIntValue("GevSCPSPacketSize", GEV_PACKET_SIZE)
+                except Exception:
+                    pass
 
-        self.cam.MV_CC_SetImageNodeNum(IMAGE_NODE_NUM)
+            is_hikrobot = any(k in self.cam_info["model"].upper() for k in ["MV-", "KC", "HIK"])
+            if is_hikrobot:
+                try:
+                    self.cam.MV_CC_SetIntValue("GevSCPD", GEV_PACKET_DELAY)
+                    self.cam.MV_CC_SetBoolValue("GevSCPHostResend", True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.cam.MV_CC_SetIntValue("GevSCPD", 400)
+                except Exception:
+                    pass
 
-        # Khóa FPS
+        try:
+            self.cam.MV_CC_SetImageNodeNum(IMAGE_NODE_NUM)
+        except Exception:
+            pass
+
+        # Khóa FPS chuẩn cho mọi camera
         if self.target_fps is not None and self.target_fps > 0:
-            self.cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", True)
-            self.cam.MV_CC_SetFloatValue("AcquisitionFrameRate", float(self.target_fps))
+            try:
+                self.cam.MV_CC_SetBoolValue("AcquisitionFrameRateEnable", True)
+                self.cam.MV_CC_SetFloatValue("AcquisitionFrameRate", float(self.target_fps))
+            except Exception:
+                try:
+                    self.cam.MV_CC_SetFloatValue("AcquisitionFrameRate", float(self.target_fps))
+                except Exception:
+                    pass
 
         # Kiểm tra Exposure Time để không bị bóp FPS
         try:
             stFloat = MVCC_FLOATVALUE()
             memset(byref(stFloat), 0, sizeof(MVCC_FLOATVALUE))
             ret = self.cam.MV_CC_GetFloatValue("ExposureTime", stFloat)
-            if ret == 0 and stFloat.fCurValue > MAX_EXPOSURE_TIME:
-                self.cam.MV_CC_SetFloatValue("ExposureTime", 50000.0)
+            max_allowed_exp = (1.0 / self.target_fps) * 1000000.0 * 0.80
+            if ret == 0 and stFloat.fCurValue > max_allowed_exp:
+                self.cam.MV_CC_SetFloatValue("ExposureTime", max_allowed_exp)
         except Exception:
             pass
 
-        self.cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
-
-        # Cân bằng trắng tự động
+        # Tắt Trigger Mode & Chuyển Continuous Mode
         try:
-            self.cam.MV_CC_SetEnumValueByString("BalanceWhiteAuto", "Continuous")
+            self.cam.MV_CC_SetEnumValueByString("TriggerMode", "Off")
+        except Exception:
+            try:
+                self.cam.MV_CC_SetEnumValue("TriggerMode", MV_TRIGGER_MODE_OFF)
+            except Exception:
+                pass
+
+        try:
+            self.cam.MV_CC_SetEnumValueByString("AcquisitionMode", "Continuous")
         except Exception:
             pass
 
-        print(f"[{self.name}] Đã mở: {self.cam_info['model']} | IP: {self.cam_info['ip']} | SN: {self.cam_info['serial']}")
+        # Cân bằng trắng tự động cho camera Màu
+        if self.cam_info.get("is_color", False):
+            try:
+                self.cam.MV_CC_SetEnumValueByString("BalanceWhiteAuto", "Continuous")
+            except Exception:
+                pass
+
+        role_tag = "MASTER (COLOR)" if self.is_master else ("SLAVE (COLOR)" if self.cam_info.get("is_color") else "SLAVE (MONO)")
+        print(f"[{self.name.upper()}: {role_tag}] Đã mở: {self.cam_info['model']} | IP: {self.cam_info['ip']} | Khóa FPS: {self.target_fps:.1f}")
         return True
 
     def start(self):
@@ -158,6 +222,17 @@ class IndustrialCamera:
         if ret != 0:
             print(f"[{self.name}] Lỗi MV_CC_StartGrabbing: 0x{ret:08x}")
             return False
+        
+        # Kích hoạt AcquisitionStart cho camera hãng thứ ba (Sentech)
+        try:
+            self.cam.MV_CC_SetCommandValue("AcquisitionStart")
+        except Exception:
+            pass
+
+        self.is_running = True
+        self.thread = threading.Thread(target=self._grab_loop, name=f"CamWorker-{self.name}", daemon=True)
+        self.thread.start()
+        return True
         
         self.is_running = True
         self.thread = threading.Thread(target=self._grab_loop, name=f"CamWorker-{self.name}", daemon=True)
@@ -289,7 +364,7 @@ def discover_cameras():
 
 
 def build_all_cameras(max_cameras=4):
-    """Tự động quét và khởi tạo danh sách tất cả camera có trên mạng."""
+    """Tự động quét, phân loại Color/Master và khởi tạo danh sách camera."""
     if not HIK_SDK_OK:
         return {}
     MvCamera.MV_CC_Initialize()
@@ -299,9 +374,44 @@ def build_all_cameras(max_cameras=4):
         return {}
 
     count = min(dev_list.nDeviceNum, max_cameras)
-    cameras = {}
+    
+    # Lấy thông tin sơ bộ
+    device_entries = []
     for i in range(count):
         dev = cast(dev_list.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
+        info = get_device_info_dict(dev)
+        device_entries.append((dev, info))
+
+    # Tìm index camera Color / Master
+    master_idx = None
+    if SPECIFIC_MASTER_IP != "" or SPECIFIC_MASTER_SERIAL != "":
+        for idx, (_, info) in enumerate(device_entries):
+            if (SPECIFIC_MASTER_IP and info["ip"] == SPECIFIC_MASTER_IP) or \
+               (SPECIFIC_MASTER_SERIAL and info["serial"] == SPECIFIC_MASTER_SERIAL):
+                master_idx = idx
+                break
+
+    if master_idx is None:
+        for idx, (_, info) in enumerate(device_entries):
+            if info.get("is_color", False):
+                master_idx = idx
+                break
+
+    if master_idx is None:
+        master_idx = 0
+
+    # Đưa Master Camera lên đầu (cam1)
+    sorted_entries = [device_entries[master_idx]] + [device_entries[i] for i in range(len(device_entries)) if i != master_idx]
+
+    cameras = {}
+    for i, (dev, info) in enumerate(sorted_entries):
         cam_name = f"cam{i + 1}"
-        cameras[cam_name] = IndustrialCamera(cam_id=i, dev_info=dev, name=cam_name, target_fps=TARGET_FPS)
+        is_master = (i == 0)
+        cameras[cam_name] = IndustrialCamera(
+            cam_id=i,
+            dev_info=dev,
+            name=cam_name,
+            is_master=is_master,
+            target_fps=TARGET_FPS
+        )
     return cameras

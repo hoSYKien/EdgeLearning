@@ -5,3 +5,5 @@ results/
 *.pt
 *.onnx
 *.engine
+*.zip
+*.tar.gz

@@ -1,0 +1,7 @@
+# CẤU HÌNH TRAIN YOLO CHO DATASET 1 CLASS
+path: d:/TongHop/RTC Technologi/RD/Tutorial/code2/multiCamera2/dataset_yolo
+train: images
+val: images
+
+names:
+  0: object

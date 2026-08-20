@@ -95,7 +95,7 @@ def get_camera_info(dev_info):
 # ============================================================
 # CẤU HÌNH HỆ THỐNG
 # ============================================================
-TARGET_FPS = 10.0          # Khóa chuẩn 10.0 FPS cho tất cả các camera
+TARGET_FPS = 5          # Khóa chuẩn 10.0 FPS cho tất cả các camera
 GEV_PACKET_SIZE = 1500     # MTU chuẩn Ethernet (1500)
 GEV_PACKET_DELAY = 1200    # Độ trễ packet tối ưu (1200 ticks ~ 10us/gói): Vừa đủ để chống nghẽn Switch mà không bị bóp tụt FPS của camera Mono!
 IMAGE_NODE_NUM = 15        # Số lượng buffer khung hình trong RAM

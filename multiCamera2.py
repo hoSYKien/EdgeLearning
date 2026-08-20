@@ -62,13 +62,12 @@ FORGET_AFTER_SEC = 1.5       # Thời gian (giây) xóa vật thể nếu tất 
 HOMOGRAPHY_FILE = "homographies_multicam2.json"
 CAPTURES_DIR = "captures_multicam2"
 
-# Mốc tọa độ vật lý mẫu trên mặt bàn (cm) dùng khi Calibrate
-# Hình chữ nhật 25cm (ngang) x 20cm (dọc)
+# Mốc tọa độ vật lý mẫu trên mặt bàn (cm) dùng khi Calibrate (Tờ A4: 29.7cm x 21.0cm)
 CALIB_TABLE_POINTS = [
     (0.0, 0.0),     # 1: Trên - Trái (Gốc tọa độ O)
-    (25.0, 0.0),    # 2: Trên - Phải
-    (25.0, 20.0),   # 3: Dưới - Phải
-    (0.0, 20.0),    # 4: Dưới - Trái
+    (29.7, 0.0),    # 2: Trên - Phải (29.7 cm)
+    (29.7, 21.0),   # 3: Dưới - Phải
+    (0.0, 21.0),    # 4: Dưới - Trái (21.0 cm)
 ]
 
 # ============================================================

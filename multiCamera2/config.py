@@ -10,18 +10,22 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # -------------------------------------------------------------
 # CẤU HÌNH CAMERA & MẠNG GIGE
 # -------------------------------------------------------------
-TARGET_FPS = 10.0            # Tốc độ khung hình (10.0 FPS chuẩn cho 2-4 camera 5MP)
+TARGET_FPS = 3.3             # Tốc độ khung hình (Chia đều cho tất cả camera)
 GEV_PACKET_SIZE = 1500       # MTU chuẩn Ethernet (1500 bytes)
-GEV_PACKET_DELAY = 1200      # Độ trễ giữa các packet (ticks) chống nghẽn Switch
+GEV_PACKET_DELAY = 1500      # Độ trễ giữa các packet (ticks) chống nghẽn Switch
 IMAGE_NODE_NUM = 15          # Buffer frame trên RAM máy tính
 MAX_EXPOSURE_TIME = 80000.0  # Giới hạn Exposure Time (us) để không bị tụt FPS
 
 MAX_CAMERAS = 4              # Hỗ trợ tối đa 4 camera đồng thời
 
+# Cấu hình chỉ định cứng Camera Master (Để trống "" để tự động chọn Camera Màu làm Master)
+SPECIFIC_MASTER_IP = ""      # Ví dụ: "192.168.1.111" hoặc để trống "" để tự động
+SPECIFIC_MASTER_SERIAL = ""  # Ví dụ: "00000005" hoặc để trống "" để tự động
+
 # -------------------------------------------------------------
 # CHẾ ĐỘ MASTER - SLAVE (CAM 1 DETECT -> CHIẾU SANG CÁC CAM SAU)
 # -------------------------------------------------------------
-MASTER_CAM = "cam1"          # Camera chính (Color): Phát hiện vật, mask, đọc barcode và đánh ID
+MASTER_CAM = "cam1"          # Camera chính (Color - Cam 1): Phát hiện vật, mask, đọc barcode và đánh ID
 DRAW_QUAD_POLYGON = True     # Vẽ cả khung đa giác 4 góc xoay thực tế khi chiếu sang Cam 2/3/4
 
 # -------------------------------------------------------------
@@ -44,15 +48,23 @@ CAPTURES_DIR = os.path.join(BASE_DIR, "captures")
 # Thứ tự click chuột: Trên-Trái -> Trên-Phải -> Dưới-Phải -> Dưới-Trái
 CALIB_TABLE_POINTS = [
     (0.0, 0.0),     # 1: Trên - Trái (Gốc tọa độ O)
-    (25.0, 0.0),    # 2: Trên - Phải
-    (25.0, 20.0),   # 3: Dưới - Phải
-    (0.0, 20.0),    # 4: Dưới - Trái
+    (29.7, 0.0),    # 2: Trên - Phải
+    (29.7, 21.0),   # 3: Dưới - Phải
+    (0.0, 21.0),    # 4: Dưới - Trái
 ]
 
 # -------------------------------------------------------------
-# CẤU HÌNH XỬ LÝ ẢNH & BARCODE (CHỈ CHẠY TRÊN MASTER CAM)
+# CẤU HÌNH XỬ LÝ ẢNH, KHỬ BÓNG & BARCODE (CHẠY TRÊN MASTER CAM)
 # -------------------------------------------------------------
-RESIZE_DIV = 4               # Tỉ lệ thu nhỏ khi trừ nền để tăng tốc độ
-BG_THRESH = 30               # Ngưỡng trừ nền
+RESIZE_DIV = 4               # Tỉ lệ thu nhỏ khi trừ nền để tăng tốc độ xử lý
+THRESH_STRONG = 35           # Ngưỡng phát hiện mạnh (chắc chắn là vật thể)
+THRESH_WEAK = 20             # Ngưỡng phát hiện yếu (kèm Connected Components)
+CHROMA_TOL = 0.04            # Dung sai sắc độ màu để nhận diện bóng
+SHADOW_DIM = (0.3, 0.95)     # Khoảng giảm độ sáng hợp lệ của bóng so với nền
+SHADOW_MAX_DIFF = 70         # Mức chênh lệch tối đa cho phép của vùng bóng
+FILL_HOLES = True            # Lấp đầy các lỗ trống/chữ bên trong vật thể
+CROP_PADDING = 10            # Padding viền xung quanh Bounding Box (pixel)
+
 MIN_AREA_RATIO = 0.002       # Diện tích vật tối thiểu so với khung hình
-MAX_AREA_RATIO = 0.90        # Diện tích vật tối đa so với khung hình
+MAX_AREA_RATIO = 0.95        # Diện tích vật tối đa so với khung hình
+SHOW_MASK_DEBUG = True       # Hiển thị ô xem trước Mask đã khử bóng (nhấn 'm' để bật/tắt)

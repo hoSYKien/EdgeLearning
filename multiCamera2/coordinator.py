@@ -92,21 +92,23 @@ def project_bbox_to_slave_cam(H_master_to_slave, bbox):
 class MasterTrackedObject:
     """Đối tượng được theo dõi xuất phát từ Master Camera (Cam 1)."""
 
-    def __init__(self, obj_id, img_bbox, table_xy, barcode=None):
+    def __init__(self, obj_id, img_bbox, table_xy, barcode=None, decoded_by=None):
         self.id = obj_id
         self.master_bbox = img_bbox          # (x1, y1, x2, y2) trên Cam 1
         self.table_xy = table_xy              # (X, Y) trên mặt bàn cm
         self.barcode = barcode
+        self.decoded_by = decoded_by          # Tên camera đã đọc thành công barcode (ví dụ: "cam1", "cam2", "cam3")
         self.last_seen = time.time()
         
         # Lưu kết quả chiếu sang các camera phụ: { cam_name: (quad_polygon, aabb_bbox, (cx, cy)) }
         self.slave_projections = {}
 
-    def update(self, img_bbox, table_xy, barcode=None):
+    def update(self, img_bbox, table_xy, barcode=None, decoded_by=None):
         self.master_bbox = img_bbox
         self.table_xy = table_xy
         if barcode and self.barcode is None:
             self.barcode = barcode
+            self.decoded_by = decoded_by
         self.last_seen = time.time()
 
 
@@ -131,17 +133,22 @@ class MasterSlaveCoordinator:
 
         # 1. Chuyển đổi các phát hiện của Master Cam sang tọa độ mặt bàn
         current_dets = []
-        for (cx, cy), barcode, bbox in master_detections:
+        for det in master_detections:
+            (cx, cy) = det[0]
+            barcode = det[1]
+            bbox = det[2]
+            decoded_by = det[3] if len(det) > 3 else (self.master_name if barcode else None)
+
             t_xy = None
             if H_master is not None:
                 t_xy = image_to_table(H_master, cx, cy)
             if t_xy is None:
                 t_xy = (cx / 10.0, cy / 10.0)
-            current_dets.append((t_xy, barcode, bbox, (cx, cy)))
+            current_dets.append((t_xy, barcode, bbox, (cx, cy), decoded_by))
 
         # 2. Tracking ID trên Master Camera qua các frame
         used_ids = set()
-        for (t_xy, barcode, bbox, (cx, cy)) in current_dets:
+        for (t_xy, barcode, bbox, (cx, cy), decoded_by) in current_dets:
             best_id, best_d = None, self.track_dist
             for oid, obj in self.objects.items():
                 if oid in used_ids:
@@ -153,9 +160,9 @@ class MasterSlaveCoordinator:
             if best_id is None:
                 best_id = self._next_id
                 self._next_id += 1
-                self.objects[best_id] = MasterTrackedObject(best_id, bbox, t_xy, barcode)
+                self.objects[best_id] = MasterTrackedObject(best_id, bbox, t_xy, barcode, decoded_by)
             else:
-                self.objects[best_id].update(bbox, t_xy, barcode)
+                self.objects[best_id].update(bbox, t_xy, barcode, decoded_by)
 
             used_ids.add(best_id)
 
